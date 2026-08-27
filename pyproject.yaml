@@ -1,0 +1,14 @@
+project:
+  name: omsi_manager
+  version: "0.1.0"
+  description: OMSI asset backup/profile manager with GUI mode
+  entry_script: omsi_manager.py
+
+build:
+  target: windows-single-exe
+  tool: pyinstaller
+  options:
+    onefile: true
+    windowed: true
+    name: omsi_manager
+    script: omsi_manager.py

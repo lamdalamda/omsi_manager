@@ -23,6 +23,52 @@ python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
 python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
   --game-root /path/to/omsi \
   --repo-root /home/runner/work/omsi_manager/omsi_manager \
+  gui
+```
+
+## GUI 默认配置
+
+- GUI 顶部可设置 `Game Root` 与 `Repo Root`
+- `Game Root` 会校验是否包含 `omsi.exe`
+- 点击 `Save Defaults` 会把默认值写入程序同目录下的 `config.txt`
+- Windows 下双击 `omsi_manager.exe`（无参数启动）会直接进入 GUI，并自动读取 `config.txt`
+
+`config.txt` 格式示例：
+
+```txt
+game_root=C:\OMSI 2
+repo_root=D:\omsi_manager_repo
+```
+
+## 打包为 Windows 单文件 EXE（双击直接进入 GUI）
+
+项目包含 `/home/runner/work/omsi_manager/omsi_manager/pyproject.yaml`（打包配置说明）。
+
+1. 安装依赖：
+
+```bash
+pip install pyinstaller
+```
+
+2. 在仓库根目录执行打包：
+
+```bash
+pyinstaller --noconfirm --onefile --windowed --name omsi_manager /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py
+```
+
+3. 产物位置：
+
+- `dist/omsi_manager.exe`
+
+4. 使用方式：
+
+- 双击 `omsi_manager.exe` 即可直接进入 GUI 模式
+- 首次设置好 `Game Root` / `Repo Root` 后点击 `Save Defaults`，下次双击会自动加载
+
+```bash
+python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
+  --game-root /path/to/omsi \
+  --repo-root /home/runner/work/omsi_manager/omsi_manager \
   profile-save yorkshire \
   --map Yorkshire \
   --vehicle YC_Masterdeck \

@@ -3,8 +3,12 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+
+
+DEFAULT_CONFIG_FILE_NAME = "config.txt"
 
 
 def _file_md5(file_path: Path) -> str:
@@ -280,6 +284,163 @@ def _parse_hof_spec(spec: str) -> Dict[str, object]:
     }
 
 
+def _split_csv(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _default_config_path() -> Path:
+    return _app_base_dir() / DEFAULT_CONFIG_FILE_NAME
+
+
+def _load_config(config_path: Path) -> Dict[str, str]:
+    if not config_path.exists():
+        return {}
+    values: Dict[str, str] = {}
+    for raw_line in config_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _save_config(config_path: Path, game_root: str, repo_root: str) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        f"game_root={game_root}\nrepo_root={repo_root}\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_game_root(game_root: Path) -> None:
+    omsi_exe = game_root / "omsi.exe"
+    if not game_root.exists() or not game_root.is_dir():
+        raise ValueError(f"Game root does not exist or is not a directory: {game_root}")
+    if not omsi_exe.exists():
+        raise ValueError(f"Game root must contain omsi.exe: {omsi_exe}")
+
+
+def _resolved_startup_roots(default_game_root: str, default_repo_root: str, config_path: Path) -> Dict[str, str]:
+    config = _load_config(config_path)
+    game_root = config.get("game_root", default_game_root)
+    repo_root = config.get("repo_root", default_repo_root)
+    return {"game_root": game_root, "repo_root": repo_root}
+
+
+def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> int:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, scrolledtext
+    except Exception as exc:
+        raise RuntimeError("Tkinter is required for GUI mode") from exc
+
+    config_path = _default_config_path()
+    startup = _resolved_startup_roots(default_game_root, default_repo_root, config_path)
+
+    root = tk.Tk()
+    root.title("OMSI Manager")
+    root.geometry("900x700")
+
+    game_root_var = tk.StringVar(value=startup["game_root"])
+    repo_root_var = tk.StringVar(value=startup["repo_root"])
+    profile_name_var = tk.StringVar()
+
+    tk.Label(root, text="Game Root").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+    tk.Entry(root, textvariable=game_root_var, width=70).grid(row=0, column=1, columnspan=4, sticky="we", padx=8, pady=4)
+    tk.Button(
+        root,
+        text="Browse",
+        command=lambda: game_root_var.set(filedialog.askdirectory() or game_root_var.get()),
+    ).grid(row=0, column=5, sticky="we", padx=8, pady=4)
+    tk.Label(root, text="Repo Root").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+    tk.Entry(root, textvariable=repo_root_var, width=70).grid(row=1, column=1, columnspan=4, sticky="we", padx=8, pady=4)
+    tk.Button(
+        root,
+        text="Browse",
+        command=lambda: repo_root_var.set(filedialog.askdirectory() or repo_root_var.get()),
+    ).grid(row=1, column=5, sticky="we", padx=8, pady=4)
+
+    tk.Label(root, text="Profile Name").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+    tk.Entry(root, textvariable=profile_name_var, width=40).grid(row=2, column=1, sticky="w", padx=8, pady=4)
+
+    tk.Label(root, text="Maps (comma-separated)").grid(row=3, column=0, sticky="w", padx=8, pady=4)
+    maps_entry = tk.Entry(root, width=80)
+    maps_entry.grid(row=3, column=1, columnspan=5, sticky="we", padx=8, pady=4)
+
+    tk.Label(root, text="Vehicles (comma-separated)").grid(row=4, column=0, sticky="w", padx=8, pady=4)
+    vehicles_entry = tk.Entry(root, width=80)
+    vehicles_entry.grid(row=4, column=1, columnspan=5, sticky="we", padx=8, pady=4)
+
+    tk.Label(root, text="HOF specs (one per line)").grid(row=5, column=0, sticky="nw", padx=8, pady=4)
+    hofs_text = scrolledtext.ScrolledText(root, width=80, height=6)
+    hofs_text.grid(row=5, column=1, columnspan=5, sticky="we", padx=8, pady=4)
+
+    output = scrolledtext.ScrolledText(root, width=110, height=20)
+    output.grid(row=8, column=0, columnspan=6, sticky="nsew", padx=8, pady=8)
+
+    for column_index in range(6):
+        root.grid_columnconfigure(column_index, weight=1 if column_index > 0 else 0)
+    root.grid_rowconfigure(8, weight=1)
+
+    def _manager_from_inputs() -> OmsiAssetManager:
+        game_root = Path(game_root_var.get()).expanduser()
+        _validate_game_root(game_root)
+        repo_root = Path(repo_root_var.get()).expanduser()
+        return OmsiAssetManager(game_root, repo_root)
+
+    def _emit(payload: object) -> None:
+        output.insert(tk.END, f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+        output.see(tk.END)
+
+    def _run(action) -> None:
+        try:
+            result = action()
+            _emit({"ok": True, "result": result})
+        except Exception as exc:
+            _emit({"ok": False, "error": str(exc)})
+
+    def _save_profile() -> None:
+        name = profile_name_var.get().strip()
+        if not name:
+            raise ValueError("Profile name is required")
+        maps = _split_csv(maps_entry.get())
+        vehicles = _split_csv(vehicles_entry.get())
+        hofs = []
+        for line in hofs_text.get("1.0", tk.END).splitlines():
+            spec = line.strip()
+            if spec:
+                hofs.append(_parse_hof_spec(spec))
+        _manager_from_inputs().save_profile(name=name, maps=maps, vehicles=vehicles, hofs=hofs)
+        return None
+
+    def _save_defaults() -> None:
+        game_root = Path(game_root_var.get()).expanduser()
+        _validate_game_root(game_root)
+        repo_root = Path(repo_root_var.get()).expanduser()
+        _save_config(config_path, str(game_root), str(repo_root))
+        return None
+
+    tk.Button(root, text="Backup All", command=lambda: _run(lambda: _manager_from_inputs().backup_all())).grid(row=6, column=0, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Profile Save", command=lambda: _run(_save_profile)).grid(row=6, column=1, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Profile List", command=lambda: _run(lambda: _manager_from_inputs().list_profiles())).grid(row=6, column=2, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Profile Get", command=lambda: _run(lambda: _manager_from_inputs().get_profile(profile_name_var.get().strip()))).grid(row=6, column=3, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Profile Activate", command=lambda: _run(lambda: _manager_from_inputs().set_active_profile(profile_name_var.get().strip()))).grid(row=6, column=4, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Save Defaults", command=lambda: _run(_save_defaults)).grid(row=6, column=5, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Restore Profile", command=lambda: _run(lambda: _manager_from_inputs().restore_profile(profile_name_var.get().strip()))).grid(row=7, column=0, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Restore Active", command=lambda: _run(lambda: _manager_from_inputs().restore_active_profile())).grid(row=7, column=1, padx=8, pady=6, sticky="we")
+    tk.Button(root, text="Clear Output", command=lambda: output.delete("1.0", tk.END)).grid(row=7, column=2, padx=8, pady=6, sticky="we")
+
+    root.mainloop()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="OMSI asset backup/profile manager")
     parser.add_argument("--game-root", default=".", help="OMSI root path (contains Vehicles/Maps)")
@@ -288,6 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("backup-all")
     sub.add_parser("restore-active")
+    sub.add_parser("gui")
 
     restore_profile = sub.add_parser("restore-profile")
     restore_profile.add_argument("name")
@@ -315,8 +477,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if len(sys.argv) == 1:
+        startup = _resolved_startup_roots(".", str(_app_base_dir()), _default_config_path())
+        return launch_gui(default_game_root=startup["game_root"], default_repo_root=startup["repo_root"])
+
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "gui":
+        return launch_gui(default_game_root=args.game_root, default_repo_root=args.repo_root)
+
     manager = OmsiAssetManager(Path(args.game_root), Path(args.repo_root))
 
     if args.command == "backup-all":

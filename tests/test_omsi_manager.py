@@ -1,10 +1,44 @@
 from pathlib import Path
 import unittest
+from unittest import mock
 
-from omsi_manager import OmsiAssetManager
+from omsi_manager import OmsiAssetManager, _load_config, _save_config, _validate_game_root, build_parser, main
 
 
 class OmsiManagerTests(unittest.TestCase):
+    def test_config_round_trip(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp:
+            config_path = Path(temp) / "config.txt"
+            _save_config(config_path, "C:/OMSI", "D:/omsi_manager_repo")
+            loaded = _load_config(config_path)
+            self.assertEqual(loaded["game_root"], "C:/OMSI")
+            self.assertEqual(loaded["repo_root"], "D:/omsi_manager_repo")
+
+    def test_validate_game_root_requires_omsi_exe(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp:
+            game_root = Path(temp) / "game"
+            game_root.mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                _validate_game_root(game_root)
+            (game_root / "omsi.exe").write_text("", encoding="utf-8")
+            _validate_game_root(game_root)
+
+    def test_main_without_args_enters_gui_mode(self):
+        with mock.patch("omsi_manager.launch_gui", return_value=0) as launch_mock:
+            with mock.patch("sys.argv", ["omsi_manager.py"]):
+                exit_code = main()
+        self.assertEqual(exit_code, 0)
+        launch_mock.assert_called_once()
+
+    def test_parser_supports_gui_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["gui"])
+        self.assertEqual(args.command, "gui")
+
     def test_backup_hof_uses_prefix_for_same_name_different_content(self):
         with self.subTest("setup and backup"):
             from tempfile import TemporaryDirectory
