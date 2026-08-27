@@ -11,4 +11,5 @@ build:
     onefile: true
     windowed: true
     name: omsi_manager
+    distpath: ..
     script: omsi_manager.py
