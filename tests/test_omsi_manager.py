@@ -74,7 +74,7 @@ class OmsiManagerTests(unittest.TestCase):
                 self.assertEqual(len(hof_names), 2)
                 self.assertTrue(any(name.endswith("_shared.hof") for name in hof_names))
 
-    def test_restore_profile_restores_map_vehicle_hof_and_ailist_assets(self):
+    def test_restore_profile_toggles_map_vehicle_and_copies_hofs(self):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temp:
@@ -82,26 +82,19 @@ class OmsiManagerTests(unittest.TestCase):
             repo = Path(temp) / "repo"
 
             (game / "vehicles" / "YC_Masterdeck").mkdir(parents=True)
+            (game / "vehicles" / "MAN_NL202").mkdir(parents=True)
             (game / "maps" / "Yorkshire").mkdir(parents=True)
-            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road").mkdir(parents=True)
+            (game / "maps" / "Grundorf").mkdir(parents=True)
 
             (game / "vehicles" / "YC_Masterdeck" / "YCV_Streetdeck.bus").write_text("bus", encoding="utf-8")
-            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").write_text("taxi", encoding="utf-8")
-            (game / "maps" / "Yorkshire" / "ailists.cfg").write_text(
-                "[aigroup_2]\nNormalCars\n\nVehicles\\YC_AI\\WH_UK_AI\\_Road\\TX4.ovh\t100\n[end]\n",
-                encoding="utf-8",
-            )
-            (game / "vehicles" / "YC_Masterdeck" / "YC_Masterdeck_Yorkshire_3.0.hof").write_text(
-                "hof-content",
-                encoding="utf-8",
-            )
+            (game / "vehicles" / "MAN_NL202" / "MAN_NL202.bus").write_text("bus", encoding="utf-8")
+            (game / "maps" / "Yorkshire" / "global.cfg").write_text("global", encoding="utf-8")
+            (game / "maps" / "Yorkshire" / "ailists.cfg").write_text("ailist", encoding="utf-8")
+            (game / "maps" / "Grundorf" / "global.cfg").write_text("global", encoding="utf-8")
 
             manager = OmsiAssetManager(game, repo)
-            manager.backup_all()
-
-            (game / "maps" / "Yorkshire" / "ailists.cfg").unlink()
-            (game / "vehicles" / "YC_Masterdeck" / "YC_Masterdeck_Yorkshire_3.0.hof").unlink()
-            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").unlink()
+            (repo / "backups" / "hof").mkdir(parents=True, exist_ok=True)
+            (repo / "backups" / "hof" / "shared.hof").write_text("hof-content", encoding="utf-8")
 
             manager.save_profile(
                 name="yorkshire",
@@ -109,9 +102,7 @@ class OmsiManagerTests(unittest.TestCase):
                 vehicles=["YC_Masterdeck"],
                 hofs=[
                     {
-                        "backup_name": "YC_Masterdeck_Yorkshire_3.0.hof",
-                        "deploy_name": "Yorkshire_3.0.hof",
-                        "target_vehicle_dirs": ["YC_Masterdeck"],
+                        "backup_name": "shared.hof",
                     }
                 ],
             )
@@ -120,11 +111,15 @@ class OmsiManagerTests(unittest.TestCase):
 
             self.assertEqual(result["maps"], 1)
             self.assertEqual(result["vehicles"], 1)
-            self.assertEqual(result["hof_copies"], 1)
-            self.assertGreaterEqual(result["map_assets"], 1)
+            self.assertGreaterEqual(result["map_toggles"], 1)
+            self.assertGreaterEqual(result["vehicle_toggles"], 1)
+            self.assertEqual(result["hof_copies"], 2)
             self.assertTrue((game / "maps" / "Yorkshire" / "ailists.cfg").exists())
-            self.assertTrue((game / "vehicles" / "YC_Masterdeck" / "Yorkshire_3.0.hof").exists())
-            self.assertTrue((game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").exists())
+            self.assertTrue((game / "maps" / "Grundorf" / "global.cfg.inactivate").exists())
+            self.assertTrue((game / "vehicles" / "YC_Masterdeck" / "YCV_Streetdeck.bus").exists())
+            self.assertTrue((game / "vehicles" / "MAN_NL202" / "MAN_NL202.bus.inactivate").exists())
+            self.assertTrue((game / "vehicles" / "YC_Masterdeck" / "shared.hof").exists())
+            self.assertTrue((game / "vehicles" / "MAN_NL202" / "shared.hof").exists())
 
     def test_profile_can_store_multiple_maps_vehicles_and_hofs(self):
         from tempfile import TemporaryDirectory
@@ -138,13 +133,9 @@ class OmsiManagerTests(unittest.TestCase):
                 hofs=[
                     {
                         "backup_name": "one.hof",
-                        "deploy_name": "one.hof",
-                        "target_vehicle_dirs": ["YC_Masterdeck"],
                     },
                     {
                         "backup_name": "two.hof",
-                        "deploy_name": "two.hof",
-                        "target_vehicle_dirs": ["MAN_NL202"],
                     },
                 ],
             )
@@ -181,10 +172,10 @@ class OmsiManagerTests(unittest.TestCase):
 
             result = manager.backup_all(progress_callback=lambda step, current, total, copied: progress.append((step, current, total, copied)))
 
-            self.assertEqual(set(result.keys()), {"hof", "maps", "vehicles", "map_assets"})
-            self.assertEqual(len(progress), 4)
-            self.assertEqual(progress[-1][1], 4)
-            self.assertEqual(progress[-1][2], 4)
+            self.assertEqual(set(result.keys()), {"hof"})
+            self.assertEqual(len(progress), 1)
+            self.assertEqual(progress[-1][1], 1)
+            self.assertEqual(progress[-1][2], 1)
 
 
 if __name__ == "__main__":

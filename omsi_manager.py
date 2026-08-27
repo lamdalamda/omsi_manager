@@ -22,12 +22,6 @@ def _file_md5(file_path: Path) -> str:
     return digest.hexdigest()
 
 
-def _copytree(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
-
-
 def _normalize_rel_path(value: str) -> Path:
     normalized = value.strip().replace("\\", "/")
     return Path(normalized)
@@ -72,10 +66,8 @@ class OmsiAssetManager:
         self.repo_root = repo_root
         self.backup_root = repo_root / "backups"
         self.hof_backup = self.backup_root / "hof"
-        self.map_backup = self.backup_root / "maps"
-        self.vehicle_backup = self.backup_root / "vehicles"
-        self.asset_backup = self.backup_root / "assets"
         self.profiles_path = repo_root / "profiles.json"
+        self.map_toggle_files = ("global.cfg", "ailists.cfg", "laststn.osn", "laststn.osn.owt")
 
     @property
     def vehicles_path(self) -> Path:
@@ -103,49 +95,6 @@ class OmsiAssetManager:
             backup_count += 1
         return backup_count
 
-    def backup_maps(self) -> int:
-        self.map_backup.mkdir(parents=True, exist_ok=True)
-        count = 0
-        if not self.maps_path.exists():
-            return count
-        for map_dir in self.maps_path.iterdir():
-            if not map_dir.is_dir():
-                continue
-            _copytree(map_dir, self.map_backup / map_dir.name)
-            count += 1
-        return count
-
-    def backup_vehicles(self) -> int:
-        self.vehicle_backup.mkdir(parents=True, exist_ok=True)
-        count = 0
-        if not self.vehicles_path.exists():
-            return count
-        for vehicle_dir in self.vehicles_path.iterdir():
-            if not vehicle_dir.is_dir():
-                continue
-            _copytree(vehicle_dir, self.vehicle_backup / vehicle_dir.name)
-            count += 1
-        return count
-
-    def backup_map_referenced_assets(self) -> int:
-        self.asset_backup.mkdir(parents=True, exist_ok=True)
-        copied = 0
-        if not self.maps_path.exists():
-            return copied
-        for ailist_path in self.maps_path.rglob("ailists.cfg"):
-            refs = _parse_ailist_refs(ailist_path.read_text(encoding="utf-8", errors="ignore"))
-            for rel_ref in refs:
-                source = self._resolve_game_path(rel_ref)
-                if not source.exists() or not source.is_file():
-                    continue
-                target = self.asset_backup / rel_ref
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists() and _file_md5(target) == _file_md5(source):
-                    continue
-                shutil.copy2(source, target)
-                copied += 1
-        return copied
-
     def backup_all(
         self,
         progress_callback: Optional[Callable[[str, int, int, int], None]] = None,
@@ -153,9 +102,6 @@ class OmsiAssetManager:
     ) -> Dict[str, int]:
         steps = [
             ("hof", self.backup_hofs),
-            ("maps", self.backup_maps),
-            ("vehicles", self.backup_vehicles),
-            ("map_assets", self.backup_map_referenced_assets),
         ]
         total = len(steps)
         results: Dict[str, int] = {}
@@ -177,34 +123,18 @@ class OmsiAssetManager:
         self.profiles_path.parent.mkdir(parents=True, exist_ok=True)
         self.profiles_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def _resolve_game_path(self, rel_ref: Path) -> Path:
-        parts = list(rel_ref.parts)
-        if not parts:
-            return self.game_root
-        first = parts[0].lower()
-        remaining = Path(*parts[1:]) if len(parts) > 1 else Path()
-        if first == "vehicles":
-            return self.vehicles_path / remaining
-        if first == "maps":
-            return self.maps_path / remaining
-        if first == "trains":
-            return (self.game_root / "trains") / remaining
-        return self.game_root / rel_ref
-
     def save_profile(
         self,
         name: str,
         hofs: Optional[List[Dict[str, object]]] = None,
         maps: Optional[List[str]] = None,
         vehicles: Optional[List[str]] = None,
-        auto_include_map_ailist_assets: bool = True,
     ) -> None:
         data = self._load_profiles()
         profile = {
             "hofs": hofs or [],
             "maps": maps or [],
             "vehicles": vehicles or [],
-            "auto_include_map_ailist_assets": auto_include_map_ailist_assets,
         }
         profiles = data.setdefault("profiles", {})
         profiles[name] = profile
@@ -228,50 +158,73 @@ class OmsiAssetManager:
         data["active_profile"] = name
         self._save_profiles(data)
 
-    def _restore_map(self, map_name: str) -> None:
-        source = self.map_backup / map_name
-        if not source.exists():
-            raise FileNotFoundError(f"Map backup not found: {map_name}")
-        destination = self.maps_path / map_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _copytree(source, destination)
+    def list_maps_with_status(self) -> List[Dict[str, object]]:
+        result: List[Dict[str, object]] = []
+        if not self.maps_path.exists():
+            return result
+        for map_dir in sorted(self.maps_path.iterdir(), key=lambda item: item.name.lower()):
+            if not map_dir.is_dir():
+                continue
+            inactive = False
+            for file_name in self.map_toggle_files:
+                if (map_dir / f"{file_name}.inactivate").exists():
+                    inactive = True
+                    break
+            result.append({"name": map_dir.name, "active": not inactive})
+        return result
 
-    def _restore_vehicle(self, vehicle_name: str) -> None:
-        source = self.vehicle_backup / vehicle_name
-        if not source.exists():
-            raise FileNotFoundError(f"Vehicle backup not found: {vehicle_name}")
-        destination = self.vehicles_path / vehicle_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _copytree(source, destination)
+    def list_vehicles_with_status(self) -> List[Dict[str, object]]:
+        result: List[Dict[str, object]] = []
+        if not self.vehicles_path.exists():
+            return result
+        for vehicle_dir in sorted(self.vehicles_path.iterdir(), key=lambda item: item.name.lower()):
+            if not vehicle_dir.is_dir():
+                continue
+            inactive = any(vehicle_dir.rglob("*.bus.inactivate"))
+            result.append({"name": vehicle_dir.name, "active": not inactive})
+        return result
 
-    def _restore_map_ailist_assets(self, map_name: str) -> int:
+    def _set_map_active(self, map_name: str, active: bool) -> int:
         map_dir = self.maps_path / map_name
-        copied = 0
-        for ailist_path in map_dir.rglob("ailists.cfg"):
-            refs = _parse_ailist_refs(ailist_path.read_text(encoding="utf-8", errors="ignore"))
-            for rel_ref in refs:
-                source = self.asset_backup / rel_ref
-                if not source.exists():
-                    continue
-                destination = self._resolve_game_path(rel_ref)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                copied += 1
-        return copied
+        if not map_dir.exists():
+            return 0
+        renamed = 0
+        for file_name in self.map_toggle_files:
+            normal = map_dir / file_name
+            inactive = map_dir / f"{file_name}.inactivate"
+            if active and inactive.exists():
+                inactive.rename(normal)
+                renamed += 1
+            elif not active and normal.exists():
+                normal.rename(inactive)
+                renamed += 1
+        return renamed
 
-    def _restore_hof_distribution(self, hofs: Iterable[Dict[str, object]]) -> int:
+    def _set_vehicle_active(self, vehicle_name: str, active: bool) -> int:
+        vehicle_dir = self.vehicles_path / vehicle_name
+        if not vehicle_dir.exists():
+            return 0
+        renamed = 0
+        if active:
+            for bus_inactive in vehicle_dir.rglob("*.bus.inactivate"):
+                bus_inactive.rename(bus_inactive.with_suffix(""))
+                renamed += 1
+        else:
+            for bus_file in vehicle_dir.rglob("*.bus"):
+                bus_file.rename(bus_file.with_name(f"{bus_file.name}.inactivate"))
+                renamed += 1
+        return renamed
+
+    def _restore_hof_distribution(self, backup_names: Iterable[str]) -> int:
         copied = 0
-        for hof in hofs:
-            backup_name = str(hof["backup_name"])
+        target_vehicle_dirs = [path for path in self.vehicles_path.iterdir() if path.is_dir()] if self.vehicles_path.exists() else []
+        for backup_name in backup_names:
             source_hof = self.hof_backup / backup_name
             if not source_hof.exists():
                 raise FileNotFoundError(f"HOF backup not found: {backup_name}")
-            deploy_name = str(hof.get("deploy_name") or backup_name)
-            target_vehicle_dirs = [str(item) for item in hof.get("target_vehicle_dirs", [])]
-            for vehicle_dir_name in target_vehicle_dirs:
-                destination_dir = self.vehicles_path / vehicle_dir_name
+            for destination_dir in target_vehicle_dirs:
                 destination_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_hof, destination_dir / deploy_name)
+                shutil.copy2(source_hof, destination_dir / backup_name)
                 copied += 1
         return copied
 
@@ -280,23 +233,30 @@ class OmsiAssetManager:
         maps = [str(item) for item in profile.get("maps", [])]
         vehicles = [str(item) for item in profile.get("vehicles", [])]
         hofs = profile.get("hofs", [])
-        auto_assets = bool(profile.get("auto_include_map_ailist_assets", True))
 
-        for vehicle in vehicles:
-            self._restore_vehicle(vehicle)
-        for map_name in maps:
-            self._restore_map(map_name)
+        selected_maps = {item.lower() for item in maps}
+        selected_vehicles = {item.lower() for item in vehicles}
+        map_toggle_count = 0
+        vehicle_toggle_count = 0
+        for item in self.list_maps_with_status():
+            map_toggle_count += self._set_map_active(str(item["name"]), str(item["name"]).lower() in selected_maps)
+        for item in self.list_vehicles_with_status():
+            vehicle_toggle_count += self._set_vehicle_active(str(item["name"]), str(item["name"]).lower() in selected_vehicles)
 
-        hof_count = self._restore_hof_distribution(hofs)
-        asset_count = 0
-        if auto_assets:
-            for map_name in maps:
-                asset_count += self._restore_map_ailist_assets(map_name)
+        backup_names = [
+            str(item.get("backup_name", "")).strip()
+            for item in hofs
+            if isinstance(item, dict) and str(item.get("backup_name", "")).strip()
+        ]
+        if not backup_names:
+            backup_names = [path.name for path in sorted(self.hof_backup.glob("*.hof"), key=lambda item: item.name.lower())]
+        hof_count = self._restore_hof_distribution(backup_names)
         return {
             "maps": len(maps),
             "vehicles": len(vehicles),
+            "map_toggles": map_toggle_count,
+            "vehicle_toggles": vehicle_toggle_count,
             "hof_copies": hof_count,
-            "map_assets": asset_count,
         }
 
     def restore_active_profile(self) -> Dict[str, int]:
@@ -308,17 +268,10 @@ class OmsiAssetManager:
 
 
 def _parse_hof_spec(spec: str) -> Dict[str, object]:
-    parts = spec.split(":")
-    if len(parts) < 2:
-        raise ValueError("--hof format must be backup_name:vehicle1,vehicle2[:deploy_name]")
-    backup_name = parts[0]
-    target_vehicle_dirs = [item for item in parts[1].split(",") if item]
-    deploy_name = parts[2] if len(parts) > 2 and parts[2] else backup_name
-    return {
-        "backup_name": backup_name,
-        "target_vehicle_dirs": target_vehicle_dirs,
-        "deploy_name": deploy_name,
-    }
+    parts = [item.strip() for item in spec.split(":") if item.strip()]
+    if not parts:
+        raise ValueError("--hof format must include backup_name")
+    return {"backup_name": parts[0]}
 
 
 def _split_csv(value: str) -> List[str]:
@@ -455,6 +408,8 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     root.grid_rowconfigure(8, weight=2)
 
     map_vehicle_auto_refs: Dict[str, Set[str]] = {}
+    map_display_name_lookup: Dict[str, str] = {}
+    vehicle_display_name_lookup: Dict[str, str] = {}
     background_backup_process: Dict[str, object] = {"proc": None, "queue": None, "cancelled": False}
     startup_prompt_shown = {"value": False}
 
@@ -479,6 +434,12 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     def _selected_values(listbox: "tk.Listbox") -> List[str]:
         return [str(listbox.get(index)) for index in listbox.curselection()]
 
+    def _selected_names(listbox: "tk.Listbox", lookup: Optional[Dict[str, str]] = None) -> List[str]:
+        values = _selected_values(listbox)
+        if not lookup:
+            return values
+        return [lookup.get(value, value) for value in values]
+
     def _select_values(listbox: "tk.Listbox", values: Iterable[str], clear_existing: bool = True) -> None:
         if clear_existing:
             listbox.selection_clear(0, tk.END)
@@ -494,14 +455,8 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
             listbox.insert(tk.END, value)
 
     def _has_initial_backup(repo_root: Path) -> bool:
-        backup_root = repo_root / "backups"
-        if not backup_root.exists():
-            return False
-        candidate_dirs = [backup_root / "maps", backup_root / "vehicles", backup_root / "hof"]
-        for directory in candidate_dirs:
-            if directory.exists() and any(directory.iterdir()):
-                return True
-        return False
+        hof_backup = repo_root / "backups" / "hof"
+        return hof_backup.exists() and any(hof_backup.glob("*.hof"))
 
     def _collect_map_vehicle_refs(map_dir: Path) -> Set[str]:
         refs: Set[str] = set()
@@ -519,6 +474,8 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
 
     def _load_backup_data(show_prompt: bool = False) -> None:
         map_vehicle_auto_refs.clear()
+        map_display_name_lookup.clear()
+        vehicle_display_name_lookup.clear()
         repo_raw = repo_root_var.get().strip()
         if not repo_raw:
             _fill_listbox(maps_listbox, [])
@@ -532,29 +489,39 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
 
         repo_root = Path(repo_raw).expanduser()
         manager = OmsiAssetManager(Path(game_root_var.get().strip() or ".").expanduser(), repo_root)
-        _set_progress(0, 3, "Loading backups...")
+        _set_progress(0, 3, "Loading game assets...")
 
-        maps = []
-        if manager.map_backup.exists():
-            maps = [path.name for path in manager.map_backup.iterdir() if path.is_dir()]
-        _set_progress(1, 3, "Loaded map backups")
+        maps_with_status = manager.list_maps_with_status()
+        maps_display = []
+        for item in maps_with_status:
+            name = str(item["name"])
+            active = bool(item["active"])
+            display = f"{name} [{'activate' if active else 'inactivate'}]"
+            maps_display.append(display)
+            map_display_name_lookup[display] = name
+        _set_progress(1, 3, "Loaded maps from game root")
 
-        vehicles = []
-        if manager.vehicle_backup.exists():
-            vehicles = [path.name for path in manager.vehicle_backup.iterdir() if path.is_dir()]
-        _set_progress(2, 3, "Loaded vehicle backups")
+        vehicles_with_status = manager.list_vehicles_with_status()
+        vehicles_display = []
+        for item in vehicles_with_status:
+            name = str(item["name"])
+            active = bool(item["active"])
+            display = f"{name} [{'activate' if active else 'inactivate'}]"
+            vehicles_display.append(display)
+            vehicle_display_name_lookup[display] = name
+        _set_progress(2, 3, "Loaded vehicles from game root")
 
         hofs = []
         if manager.hof_backup.exists():
             hofs = [path.name for path in manager.hof_backup.glob("*.hof") if path.is_file()]
         _set_progress(3, 3, "Loaded hof backups")
 
-        for map_name in maps:
-            refs = _collect_map_vehicle_refs(manager.map_backup / map_name)
+        for map_name in [str(item["name"]) for item in maps_with_status]:
+            refs = _collect_map_vehicle_refs(manager.maps_path / map_name)
             map_vehicle_auto_refs[map_name] = refs
 
-        _fill_listbox(maps_listbox, maps)
-        _fill_listbox(vehicles_listbox, vehicles)
+        _fill_listbox(maps_listbox, maps_display)
+        _fill_listbox(vehicles_listbox, vehicles_display)
         _fill_listbox(hofs_listbox, hofs)
 
         if not _has_initial_backup(repo_root):
@@ -566,13 +533,18 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
             status_var.set("Backups loaded")
 
     def _apply_map_vehicle_auto_select(_event=None) -> None:
-        selected_maps = _selected_values(maps_listbox)
+        selected_maps = _selected_names(maps_listbox, map_display_name_lookup)
         auto_targets: Set[str] = set()
         for map_name in selected_maps:
             auto_targets.update(map_vehicle_auto_refs.get(map_name, set()))
         if not auto_targets:
             return
-        _select_values(vehicles_listbox, auto_targets, clear_existing=False)
+        matched_display_values: List[str] = []
+        for display_value, vehicle_name in vehicle_display_name_lookup.items():
+            vehicle_key = vehicle_name.lower()
+            if any(target in vehicle_key or vehicle_key in target for target in auto_targets):
+                matched_display_values.append(display_value)
+        _select_values(vehicles_listbox, matched_display_values, clear_existing=False)
 
     def _select_all(listbox: "tk.Listbox") -> None:
         listbox.selection_set(0, tk.END)
@@ -624,7 +596,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         background_backup_process["proc"] = process
         background_backup_process["queue"] = events
         background_backup_process["cancelled"] = False
-        backup_progress.configure(maximum=4)
+        backup_progress.configure(maximum=1)
         backup_progress_var.set(0)
         status_var.set("Backup running...")
 
@@ -665,12 +637,12 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
                     continue
                 if payload.get("event") == "backup_progress":
                     current = int(payload.get("current", 0))
-                    total = int(payload.get("total", 4))
+                    total = int(payload.get("total", 1))
                     step = str(payload.get("step", ""))
                     copied = int(payload.get("copied", 0))
                     _set_progress(current, total, f"Backup {step} done: {copied}")
-                elif all(key in payload for key in ("hof", "maps", "vehicles", "map_assets")):
-                    final_result = {key: int(payload[key]) for key in ("hof", "maps", "vehicles", "map_assets")}
+                elif "hof" in payload:
+                    final_result = {"hof": int(payload["hof"])}
                     _emit({"ok": True, "result": final_result})
                 else:
                     _emit(payload)
@@ -693,12 +665,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
 
         if return_code == 0 and final_result is not None:
             status_var.set("Backup completed")
-            summary = (
-                f"HOF: {final_result['hof']}\n"
-                f"Maps: {final_result['maps']}\n"
-                f"Vehicles: {final_result['vehicles']}\n"
-                f"Map assets: {final_result['map_assets']}"
-            )
+            summary = f"HOF: {final_result['hof']}"
             messagebox.showinfo("Backup completed", summary)
             _load_backup_data(show_prompt=False)
             return
@@ -717,13 +684,11 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         name = profile_name_var.get().strip()
         if not name:
             raise ValueError("Profile name is required")
-        maps = _selected_values(maps_listbox)
-        vehicles = _selected_values(vehicles_listbox)
+        maps = _selected_names(maps_listbox, map_display_name_lookup)
+        vehicles = _selected_names(vehicles_listbox, vehicle_display_name_lookup)
         hofs = [
             {
                 "backup_name": hof_name,
-                "deploy_name": hof_name,
-                "target_vehicle_dirs": vehicles,
             }
             for hof_name in _selected_values(hofs_listbox)
         ]
@@ -735,8 +700,10 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         maps = [str(item) for item in profile.get("maps", [])]
         vehicles = [str(item) for item in profile.get("vehicles", [])]
         hofs = [str(item.get("backup_name", "")) for item in profile.get("hofs", []) if isinstance(item, dict)]
-        _select_values(maps_listbox, maps)
-        _select_values(vehicles_listbox, vehicles)
+        map_displays = [display for display, name in map_display_name_lookup.items() if name in maps]
+        vehicle_displays = [display for display, name in vehicle_display_name_lookup.items() if name in vehicles]
+        _select_values(maps_listbox, map_displays)
+        _select_values(vehicles_listbox, vehicle_displays)
         _select_values(hofs_listbox, hofs)
         _apply_map_vehicle_auto_select()
         return profile
@@ -787,9 +754,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--hof",
         action="append",
         default=[],
-        help="backup_name:vehicle1,vehicle2[:deploy_name]",
+        help="backup_name",
     )
-    profile_save.add_argument("--no-ailist-assets", action="store_true")
 
     profile_get = sub.add_parser("profile-get")
     profile_get.add_argument("name")
@@ -847,7 +813,6 @@ def main() -> int:
             hofs=hofs,
             maps=args.map,
             vehicles=args.vehicle,
-            auto_include_map_ailist_assets=not args.no_ailist_assets,
         )
         return 0
     if args.command == "profile-get":
