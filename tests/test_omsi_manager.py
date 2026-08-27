@@ -2,7 +2,15 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from omsi_manager import OmsiAssetManager, _load_config, _save_config, _validate_game_root, build_parser, main
+from omsi_manager import (
+    OmsiAssetManager,
+    _load_config,
+    _save_config,
+    _validate_game_root,
+    _vehicle_names_from_ailist_content,
+    build_parser,
+    main,
+)
 
 
 class OmsiManagerTests(unittest.TestCase):
@@ -38,6 +46,12 @@ class OmsiManagerTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["gui"])
         self.assertEqual(args.command, "gui")
+
+    def test_parser_supports_backup_all_progress_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["backup-all", "--progress-json-lines"])
+        self.assertEqual(args.command, "backup-all")
+        self.assertTrue(args.progress_json_lines)
 
     def test_backup_hof_uses_prefix_for_same_name_different_content(self):
         with self.subTest("setup and backup"):
@@ -138,6 +152,39 @@ class OmsiManagerTests(unittest.TestCase):
             self.assertEqual(len(profile["maps"]), 2)
             self.assertEqual(len(profile["vehicles"]), 2)
             self.assertEqual(len(profile["hofs"]), 2)
+
+    def test_vehicle_names_from_ailist_content_extracts_vehicle_refs(self):
+        content = (
+            "[aigroup_2]\n"
+            "Vehicles\\YC_AI\\WH_UK_AI\\_Road\\TX4.ovh\t100\n"
+            "Vehicles\\MAN_NL202\\model\\nl202.bus 1\n"
+            "[end]\n"
+        )
+        names = _vehicle_names_from_ailist_content(content)
+        self.assertIn("YC_AI", names)
+        self.assertIn("MAN_NL202", names)
+        self.assertIn("TX4", names)
+        self.assertIn("nl202", names)
+
+    def test_backup_all_reports_progress(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp:
+            game = Path(temp) / "game"
+            repo = Path(temp) / "repo"
+            game.mkdir(parents=True)
+            (game / "omsi.exe").write_text("", encoding="utf-8")
+            (game / "maps").mkdir(parents=True)
+            (game / "vehicles").mkdir(parents=True)
+            manager = OmsiAssetManager(game, repo)
+            progress = []
+
+            result = manager.backup_all(progress_callback=lambda step, current, total, copied: progress.append((step, current, total, copied)))
+
+            self.assertEqual(set(result.keys()), {"hof", "maps", "vehicles", "map_assets"})
+            self.assertEqual(len(progress), 4)
+            self.assertEqual(progress[-1][1], 4)
+            self.assertEqual(progress[-1][2], 4)
 
 
 if __name__ == "__main__":
