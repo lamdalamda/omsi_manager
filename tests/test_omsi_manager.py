@@ -1,0 +1,110 @@
+from pathlib import Path
+import unittest
+
+from omsi_manager import OmsiAssetManager
+
+
+class OmsiManagerTests(unittest.TestCase):
+    def test_backup_hof_uses_prefix_for_same_name_different_content(self):
+        with self.subTest("setup and backup"):
+            from tempfile import TemporaryDirectory
+
+            with TemporaryDirectory() as temp:
+                root = Path(temp) / "game"
+                repo = Path(temp) / "repo"
+                (root / "vehicles" / "A").mkdir(parents=True)
+                (root / "vehicles" / "B").mkdir(parents=True)
+                (root / "vehicles" / "A" / "shared.hof").write_text("one", encoding="utf-8")
+                (root / "vehicles" / "B" / "shared.hof").write_text("two", encoding="utf-8")
+
+                manager = OmsiAssetManager(root, repo)
+                copied = manager.backup_hofs()
+
+                self.assertEqual(copied, 2)
+                hof_names = sorted(path.name for path in (repo / "backups" / "hof").glob("*.hof"))
+                self.assertIn("shared.hof", hof_names)
+                self.assertEqual(len(hof_names), 2)
+                self.assertTrue(any(name.endswith("_shared.hof") for name in hof_names))
+
+    def test_restore_profile_restores_map_vehicle_hof_and_ailist_assets(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp:
+            game = Path(temp) / "game"
+            repo = Path(temp) / "repo"
+
+            (game / "vehicles" / "YC_Masterdeck").mkdir(parents=True)
+            (game / "maps" / "Yorkshire").mkdir(parents=True)
+            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road").mkdir(parents=True)
+
+            (game / "vehicles" / "YC_Masterdeck" / "YCV_Streetdeck.bus").write_text("bus", encoding="utf-8")
+            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").write_text("taxi", encoding="utf-8")
+            (game / "maps" / "Yorkshire" / "ailists.cfg").write_text(
+                "[aigroup_2]\nNormalCars\n\nVehicles\\YC_AI\\WH_UK_AI\\_Road\\TX4.ovh\t100\n[end]\n",
+                encoding="utf-8",
+            )
+            (game / "vehicles" / "YC_Masterdeck" / "YC_Masterdeck_Yorkshire_3.0.hof").write_text(
+                "hof-content",
+                encoding="utf-8",
+            )
+
+            manager = OmsiAssetManager(game, repo)
+            manager.backup_all()
+
+            (game / "maps" / "Yorkshire" / "ailists.cfg").unlink()
+            (game / "vehicles" / "YC_Masterdeck" / "YC_Masterdeck_Yorkshire_3.0.hof").unlink()
+            (game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").unlink()
+
+            manager.save_profile(
+                name="yorkshire",
+                maps=["Yorkshire"],
+                vehicles=["YC_Masterdeck"],
+                hofs=[
+                    {
+                        "backup_name": "YC_Masterdeck_Yorkshire_3.0.hof",
+                        "deploy_name": "Yorkshire_3.0.hof",
+                        "target_vehicle_dirs": ["YC_Masterdeck"],
+                    }
+                ],
+            )
+
+            result = manager.restore_profile("yorkshire")
+
+            self.assertEqual(result["maps"], 1)
+            self.assertEqual(result["vehicles"], 1)
+            self.assertEqual(result["hof_copies"], 1)
+            self.assertGreaterEqual(result["map_assets"], 1)
+            self.assertTrue((game / "maps" / "Yorkshire" / "ailists.cfg").exists())
+            self.assertTrue((game / "vehicles" / "YC_Masterdeck" / "Yorkshire_3.0.hof").exists())
+            self.assertTrue((game / "vehicles" / "YC_AI" / "WH_UK_AI" / "_Road" / "TX4.ovh").exists())
+
+    def test_profile_can_store_multiple_maps_vehicles_and_hofs(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temp:
+            manager = OmsiAssetManager(Path(temp) / "game", Path(temp) / "repo")
+            manager.save_profile(
+                name="multi",
+                maps=["Yorkshire", "Grundorf"],
+                vehicles=["YC_Masterdeck", "MAN_NL202"],
+                hofs=[
+                    {
+                        "backup_name": "one.hof",
+                        "deploy_name": "one.hof",
+                        "target_vehicle_dirs": ["YC_Masterdeck"],
+                    },
+                    {
+                        "backup_name": "two.hof",
+                        "deploy_name": "two.hof",
+                        "target_vehicle_dirs": ["MAN_NL202"],
+                    },
+                ],
+            )
+            profile = manager.get_profile("multi")
+            self.assertEqual(len(profile["maps"]), 2)
+            self.assertEqual(len(profile["vehicles"]), 2)
+            self.assertEqual(len(profile["hofs"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
