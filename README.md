@@ -23,6 +23,13 @@ python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
 python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
   --game-root /path/to/omsi \
   --repo-root /home/runner/work/omsi_manager/omsi_manager \
+  gui
+```
+
+```bash
+python /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py \
+  --game-root /path/to/omsi \
+  --repo-root /home/runner/work/omsi_manager/omsi_manager \
   profile-save yorkshire \
   --map Yorkshire \
   --vehicle YC_Masterdeck \

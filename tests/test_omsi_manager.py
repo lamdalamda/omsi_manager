@@ -1,10 +1,15 @@
 from pathlib import Path
 import unittest
 
-from omsi_manager import OmsiAssetManager
+from omsi_manager import OmsiAssetManager, build_parser
 
 
 class OmsiManagerTests(unittest.TestCase):
+    def test_parser_supports_gui_command(self):
+        parser = build_parser()
+        args = parser.parse_args(["gui"])
+        self.assertEqual(args.command, "gui")
+
     def test_backup_hof_uses_prefix_for_same_name_different_content(self):
         with self.subTest("setup and backup"):
             from tempfile import TemporaryDirectory
