@@ -8,7 +8,7 @@ import sys
 import threading
 from queue import Empty, Queue
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 
 DEFAULT_CONFIG_FILE_NAME = "config.txt"
@@ -152,12 +152,6 @@ class OmsiAssetManager:
         profiles = data.get("profiles", {})
         return sorted(profiles.keys())
 
-    def set_active_profile(self, name: str) -> None:
-        _ = self.get_profile(name)
-        data = self._load_profiles()
-        data["active_profile"] = name
-        self._save_profiles(data)
-
     def list_maps_with_status(self) -> List[Dict[str, object]]:
         result: List[Dict[str, object]] = []
         if not self.maps_path.exists():
@@ -180,8 +174,18 @@ class OmsiAssetManager:
         for vehicle_dir in sorted(self.vehicles_path.iterdir(), key=lambda item: item.name.lower()):
             if not vehicle_dir.is_dir():
                 continue
-            inactive = any(vehicle_dir.rglob("*.bus.inactivate"))
-            result.append({"name": vehicle_dir.name, "active": not inactive})
+            try:
+                has_active = any(vehicle_dir.rglob("*.bus"))
+            except StopIteration:
+                has_active = False
+            try:
+                has_inactive = any(vehicle_dir.rglob("*.bus.inactivate"))
+            except StopIteration:
+                has_inactive = False
+                
+            if not has_active and not has_inactive:
+                continue
+            result.append({"name": vehicle_dir.name, "active": has_active})
         return result
 
     def _set_map_active(self, map_name: str, active: bool) -> int:
@@ -217,54 +221,53 @@ class OmsiAssetManager:
 
     def _restore_hof_distribution(self, backup_names: Iterable[str]) -> int:
         copied = 0
-        target_vehicle_dirs = [path for path in self.vehicles_path.iterdir() if path.is_dir()] if self.vehicles_path.exists() else []
-        for backup_name in backup_names:
-            source_hof = self.hof_backup / backup_name
-            if not source_hof.exists():
+        selected_hofs = set(backup_names)
+        
+        for backup_name in selected_hofs:
+            if not (self.hof_backup / backup_name).exists():
                 raise FileNotFoundError(f"HOF backup not found: {backup_name}")
-            for destination_dir in target_vehicle_dirs:
-                destination_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_hof, destination_dir / backup_name)
+
+        if not self.vehicles_path.exists():
+            return 0
+
+        target_vehicle_dirs = [path for path in self.vehicles_path.iterdir() if path.is_dir()]
+        for destination_dir in target_vehicle_dirs:
+            for existing_hof in destination_dir.glob("*.hof"):
+                if existing_hof.name not in selected_hofs:
+                    try:
+                        existing_hof.unlink()
+                    except FileNotFoundError:
+                        pass
+                        
+            for backup_name in selected_hofs:
+                source_hof = self.hof_backup / backup_name
+                target_hof = destination_dir / backup_name
+                shutil.copy2(source_hof, target_hof)
                 copied += 1
         return copied
 
-    def restore_profile(self, name: str) -> Dict[str, int]:
-        profile = self.get_profile(name)
-        maps = [str(item) for item in profile.get("maps", [])]
-        vehicles = [str(item) for item in profile.get("vehicles", [])]
-        hofs = profile.get("hofs", [])
-
-        selected_maps = {item.lower() for item in maps}
-        selected_vehicles = {item.lower() for item in vehicles}
+    def apply_selections(self, selected_maps: List[str], selected_vehicles: List[str], selected_hofs: List[str]) -> Dict[str, int]:
+        maps_set = {item.lower() for item in selected_maps}
+        vehicles_set = {item.lower() for item in selected_vehicles}
         map_toggle_count = 0
         vehicle_toggle_count = 0
-        for item in self.list_maps_with_status():
-            map_toggle_count += self._set_map_active(str(item["name"]), str(item["name"]).lower() in selected_maps)
-        for item in self.list_vehicles_with_status():
-            vehicle_toggle_count += self._set_vehicle_active(str(item["name"]), str(item["name"]).lower() in selected_vehicles)
 
-        backup_names = [
-            str(item.get("backup_name", "")).strip()
-            for item in hofs
-            if isinstance(item, dict) and str(item.get("backup_name", "")).strip()
-        ]
-        if not backup_names:
-            backup_names = [path.name for path in sorted(self.hof_backup.glob("*.hof"), key=lambda item: item.name.lower())]
-        hof_count = self._restore_hof_distribution(backup_names)
+        for item in self.list_maps_with_status():
+            map_name = str(item["name"])
+            map_toggle_count += self._set_map_active(map_name, map_name.lower() in maps_set)
+
+        for item in self.list_vehicles_with_status():
+            veh_name = str(item["name"])
+            vehicle_toggle_count += self._set_vehicle_active(veh_name, veh_name.lower() in vehicles_set)
+
+        hof_count = self._restore_hof_distribution(selected_hofs) if selected_hofs else 0
         return {
-            "maps": len(maps),
-            "vehicles": len(vehicles),
+            "maps": len(selected_maps),
+            "vehicles": len(selected_vehicles),
             "map_toggles": map_toggle_count,
             "vehicle_toggles": vehicle_toggle_count,
             "hof_copies": hof_count,
         }
-
-    def restore_active_profile(self) -> Dict[str, int]:
-        data = self._load_profiles()
-        active_profile = data.get("active_profile")
-        if not active_profile:
-            raise RuntimeError("No active profile is set")
-        return self.restore_profile(str(active_profile))
 
 
 def _parse_hof_spec(spec: str) -> Dict[str, object]:
@@ -272,10 +275,6 @@ def _parse_hof_spec(spec: str) -> Dict[str, object]:
     if not parts:
         raise ValueError("--hof format must include backup_name")
     return {"backup_name": parts[0]}
-
-
-def _split_csv(value: str) -> List[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _app_base_dir() -> Path:
@@ -344,22 +343,23 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     status_var = tk.StringVar(value="Ready")
     backup_progress_var = tk.DoubleVar(value=0)
 
-    tk.Label(root, text="Game Root").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+    tk.Label(root, text="游戏目录 (Game Root)").grid(row=0, column=0, sticky="w", padx=8, pady=4)
     tk.Entry(root, textvariable=game_root_var, width=70).grid(row=0, column=1, columnspan=6, sticky="we", padx=8, pady=4)
     tk.Button(
         root,
-        text="Browse",
+        text="浏览",
         command=lambda: game_root_var.set(filedialog.askdirectory() or game_root_var.get()),
     ).grid(row=0, column=7, sticky="we", padx=8, pady=4)
-    tk.Label(root, text="Repo Root").grid(row=1, column=0, sticky="w", padx=8, pady=4)
+
+    tk.Label(root, text="备份目录 (Repo Root)").grid(row=1, column=0, sticky="w", padx=8, pady=4)
     tk.Entry(root, textvariable=repo_root_var, width=70).grid(row=1, column=1, columnspan=6, sticky="we", padx=8, pady=4)
     tk.Button(
         root,
-        text="Browse",
+        text="浏览",
         command=lambda: repo_root_var.set(filedialog.askdirectory() or repo_root_var.get()),
     ).grid(row=1, column=7, sticky="we", padx=8, pady=4)
 
-    tk.Label(root, text="Profile Name").grid(row=2, column=0, sticky="w", padx=8, pady=4)
+    tk.Label(root, text="配置名称 (Profile)").grid(row=2, column=0, sticky="w", padx=8, pady=4)
     tk.Entry(root, textvariable=profile_name_var, width=40).grid(row=2, column=1, sticky="w", padx=8, pady=4)
 
     action_bar = tk.Frame(root)
@@ -388,17 +388,17 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     for column_index in range(3):
         selector_container.grid_columnconfigure(column_index, weight=1)
     selector_container.grid_rowconfigure(0, weight=1)
+    tk.Label(maps_frame, text="地图 (Maps)", bg="white").pack(side=tk.TOP, anchor="w", padx=8, pady=(8, 4))
+    maps_listbox = tk.Listbox(maps_frame, selectmode=tk.SINGLE, exportselection=False, height=14)
+    # maps_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)  <-- 删掉这行
 
-    tk.Label(maps_frame, text="Maps", bg="white").pack(anchor="w", padx=8, pady=(8, 4))
-    maps_listbox = tk.Listbox(maps_frame, selectmode=tk.EXTENDED, exportselection=False, height=14)
-    maps_listbox.pack(fill="both", expand=True, padx=8, pady=4)
-    tk.Label(vehicles_frame, text="Vehicles", bg="white").pack(anchor="w", padx=8, pady=(8, 4))
-    vehicles_listbox = tk.Listbox(vehicles_frame, selectmode=tk.EXTENDED, exportselection=False, height=14)
-    vehicles_listbox.pack(fill="both", expand=True, padx=8, pady=4)
-    tk.Label(hofs_frame, text="HOFs", bg="white").pack(anchor="w", padx=8, pady=(8, 4))
-    hofs_listbox = tk.Listbox(hofs_frame, selectmode=tk.EXTENDED, exportselection=False, height=14)
-    hofs_listbox.pack(fill="both", expand=True, padx=8, pady=4)
+    tk.Label(vehicles_frame, text="车辆 (Vehicles)", bg="white").pack(side=tk.TOP, anchor="w", padx=8, pady=(8, 4))
+    vehicles_listbox = tk.Listbox(vehicles_frame, selectmode=tk.SINGLE, exportselection=False, height=14)
+    # vehicles_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)  <-- 删掉这行
 
+    tk.Label(hofs_frame, text="HOF 备份", bg="white").pack(side=tk.TOP, anchor="w", padx=8, pady=(8, 4))
+    hofs_listbox = tk.Listbox(hofs_frame, selectmode=tk.SINGLE, exportselection=False, height=14)
+    # hofs_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)  <-- 删掉这行
     output = scrolledtext.ScrolledText(root, width=110, height=20)
     output.grid(row=8, column=0, columnspan=8, sticky="nsew", padx=8, pady=8)
 
@@ -427,12 +427,30 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     def _run(action) -> None:
         try:
             result = action()
-            _emit({"ok": True, "result": result})
+            if result is not None:
+                _emit({"ok": True, "result": result})
         except Exception as exc:
             _emit({"ok": False, "error": str(exc)})
 
+    def _toggle_listbox_item(event: "tk.Event", listbox: "tk.Listbox") -> None:
+        index = listbox.nearest(event.y)
+        if index < 0:
+            return
+        text = str(listbox.get(index))
+        if text.startswith("[X] "):
+            listbox.delete(index)
+            listbox.insert(index, f"[ ] {text[4:]}")
+        elif text.startswith("[ ] "):
+            listbox.delete(index)
+            listbox.insert(index, f"[X] {text[4:]}")
+        listbox.selection_clear(0, tk.END)
+
+    maps_listbox.bind("<ButtonRelease-1>", lambda e: _toggle_listbox_item(e, maps_listbox))
+    vehicles_listbox.bind("<ButtonRelease-1>", lambda e: _toggle_listbox_item(e, vehicles_listbox))
+    hofs_listbox.bind("<ButtonRelease-1>", lambda e: _toggle_listbox_item(e, hofs_listbox))
+
     def _selected_values(listbox: "tk.Listbox") -> List[str]:
-        return [str(listbox.get(index)) for index in listbox.curselection()]
+        return [str(listbox.get(i))[4:] for i in range(listbox.size()) if str(listbox.get(i)).startswith("[X] ")]
 
     def _selected_names(listbox: "tk.Listbox", lookup: Optional[Dict[str, str]] = None) -> List[str]:
         values = _selected_values(listbox)
@@ -441,18 +459,23 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         return [lookup.get(value, value) for value in values]
 
     def _select_values(listbox: "tk.Listbox", values: Iterable[str], clear_existing: bool = True) -> None:
-        if clear_existing:
-            listbox.selection_clear(0, tk.END)
         target = {str(value).lower() for value in values}
         for index in range(listbox.size()):
-            item = str(listbox.get(index))
-            if item.lower() in target:
-                listbox.selection_set(index)
+            text = str(listbox.get(index))
+            core_text = text[4:]
+            if clear_existing:
+                prefix = "[X] " if core_text.lower() in target else "[ ] "
+            else:
+                prefix = "[X] " if text.startswith("[X] ") or core_text.lower() in target else "[ ] "
+            if text != f"{prefix}{core_text}":
+                listbox.delete(index)
+                listbox.insert(index, f"{prefix}{core_text}")
 
-    def _fill_listbox(listbox: "tk.Listbox", values: Iterable[str]) -> None:
+    def _fill_listbox(listbox: "tk.Listbox", values_with_state: Iterable[Tuple[str, bool]]) -> None:
         listbox.delete(0, tk.END)
-        for value in sorted(values, key=lambda item: item.lower()):
-            listbox.insert(tk.END, value)
+        for value, is_active in sorted(values_with_state, key=lambda item: item[0].lower()):
+            prefix = "[X] " if is_active else "[ ] "
+            listbox.insert(tk.END, f"{prefix}{value}")
 
     def _has_initial_backup(repo_root: Path) -> bool:
         hof_backup = repo_root / "backups" / "hof"
@@ -481,40 +504,38 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
             _fill_listbox(maps_listbox, [])
             _fill_listbox(vehicles_listbox, [])
             _fill_listbox(hofs_listbox, [])
-            status_var.set("Repo Root is empty")
+            status_var.set("备份目录为空")
             if show_prompt and not startup_prompt_shown["value"]:
                 startup_prompt_shown["value"] = True
-                messagebox.showinfo("首次复制提示", "尚未设置或检测到空的 Repo Root，请设置 Game Root 并点击 Backup All。")
+                messagebox.showinfo("提示", "尚未设置备份目录，请设置并点击“备份全部”。")
             return
 
         repo_root = Path(repo_raw).expanduser()
         manager = OmsiAssetManager(Path(game_root_var.get().strip() or ".").expanduser(), repo_root)
-        _set_progress(0, 3, "Loading game assets...")
+        _set_progress(0, 3, "正在加载游戏资产...")
 
         maps_with_status = manager.list_maps_with_status()
         maps_display = []
         for item in maps_with_status:
             name = str(item["name"])
             active = bool(item["active"])
-            display = f"{name} [{'activate' if active else 'inactivate'}]"
-            maps_display.append(display)
-            map_display_name_lookup[display] = name
-        _set_progress(1, 3, "Loaded maps from game root")
+            maps_display.append((name, active))
+            map_display_name_lookup[name] = name
+        _set_progress(1, 3, "地图加载完成")
 
         vehicles_with_status = manager.list_vehicles_with_status()
         vehicles_display = []
         for item in vehicles_with_status:
             name = str(item["name"])
             active = bool(item["active"])
-            display = f"{name} [{'activate' if active else 'inactivate'}]"
-            vehicles_display.append(display)
-            vehicle_display_name_lookup[display] = name
-        _set_progress(2, 3, "Loaded vehicles from game root")
+            vehicles_display.append((name, active))
+            vehicle_display_name_lookup[name] = name
+        _set_progress(2, 3, "车辆加载完成")
 
         hofs = []
         if manager.hof_backup.exists():
-            hofs = [path.name for path in manager.hof_backup.glob("*.hof") if path.is_file()]
-        _set_progress(3, 3, "Loaded hof backups")
+            hofs = [(path.name, False) for path in manager.hof_backup.glob("*.hof") if path.is_file()]
+        _set_progress(3, 3, "HOF 文件加载完成")
 
         for map_name in [str(item["name"]) for item in maps_with_status]:
             refs = _collect_map_vehicle_refs(manager.maps_path / map_name)
@@ -525,12 +546,9 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         _fill_listbox(hofs_listbox, hofs)
 
         if not _has_initial_backup(repo_root):
-            status_var.set("No initial backup found. Set Game Root then click Backup All.")
-            if show_prompt and not startup_prompt_shown["value"]:
-                startup_prompt_shown["value"] = True
-                messagebox.showinfo("首次复制提示", "检测到尚未进行初次复制，请设置 Game Root 并点击 Backup All。")
+            status_var.set("未找到初次备份记录。请设置游戏目录后点击“备份全部”。")
         else:
-            status_var.set("Backups loaded")
+            status_var.set("加载完成")
 
     def _apply_map_vehicle_auto_select(_event=None) -> None:
         selected_maps = _selected_names(maps_listbox, map_display_name_lookup)
@@ -546,35 +564,30 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
                 matched_display_values.append(display_value)
         _select_values(vehicles_listbox, matched_display_values, clear_existing=False)
 
-    def _select_all(listbox: "tk.Listbox") -> None:
-        listbox.selection_set(0, tk.END)
-
-    def _invert_selection(listbox: "tk.Listbox") -> None:
-        selected = set(listbox.curselection())
+    def _set_all_state(listbox: "tk.Listbox", state: bool) -> None:
         for index in range(listbox.size()):
-            if index in selected:
-                listbox.selection_clear(index)
-            else:
-                listbox.selection_set(index)
-
-    def _clear_selection(listbox: "tk.Listbox") -> None:
-        listbox.selection_clear(0, tk.END)
+            text = str(listbox.get(index))[4:]
+            prefix = "[X] " if state else "[ ] "
+            listbox.delete(index)
+            listbox.insert(index, f"{prefix}{text}")
 
     def _add_selection_buttons(container: "tk.Frame", listbox: "tk.Listbox") -> None:
         button_bar = tk.Frame(container, bg="white")
-        button_bar.pack(fill="x", padx=8, pady=(0, 8))
-        tk.Button(button_bar, text="Select All", command=lambda: _select_all(listbox)).pack(side="left", padx=2)
-        tk.Button(button_bar, text="Invert", command=lambda: _invert_selection(listbox)).pack(side="left", padx=2)
-        tk.Button(button_bar, text="Clear", command=lambda: _clear_selection(listbox)).pack(side="left", padx=2)
+        button_bar.pack(side=tk.BOTTOM, fill="x", padx=8, pady=8)
+        tk.Button(button_bar, text="全选", command=lambda: _set_all_state(listbox, True)).pack(side="left", padx=2)
+        tk.Button(button_bar, text="清空", command=lambda: _set_all_state(listbox, False)).pack(side="left", padx=2)
 
     _add_selection_buttons(maps_frame, maps_listbox)
     _add_selection_buttons(vehicles_frame, vehicles_listbox)
     _add_selection_buttons(hofs_frame, hofs_listbox)
-    maps_listbox.bind("<<ListboxSelect>>", _apply_map_vehicle_auto_select)
+    maps_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
+    vehicles_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
+    hofs_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
+    maps_listbox.bind("<ButtonRelease-1>", lambda e: [root.after(50, _apply_map_vehicle_auto_select), _toggle_listbox_item(e, maps_listbox)])
 
     def _start_backup_subprocess() -> None:
         if background_backup_process["proc"] is not None:
-            raise RuntimeError("Backup is already running")
+            raise RuntimeError("备份进程已在运行")
         manager = _manager_from_inputs(validate_game_root=True)
         manager.repo_root.mkdir(parents=True, exist_ok=True)
         _save_config(config_path, str(manager.game_root), str(manager.repo_root))
@@ -598,7 +611,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         background_backup_process["cancelled"] = False
         backup_progress.configure(maximum=1)
         backup_progress_var.set(0)
-        status_var.set("Backup running...")
+        status_var.set("备份中...")
 
         def _reader() -> None:
             assert process.stdout is not None
@@ -640,7 +653,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
                     total = int(payload.get("total", 1))
                     step = str(payload.get("step", ""))
                     copied = int(payload.get("copied", 0))
-                    _set_progress(current, total, f"Backup {step} done: {copied}")
+                    _set_progress(current, total, f"备份 {step} 完成: {copied}")
                 elif "hof" in payload:
                     final_result = {"hof": int(payload["hof"])}
                     _emit({"ok": True, "result": final_result})
@@ -658,20 +671,20 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         background_backup_process["queue"] = None
 
         if background_backup_process.get("cancelled"):
-            status_var.set("Backup cancelled")
-            messagebox.showinfo("Backup", "备份已中止。")
+            status_var.set("备份已取消")
+            messagebox.showinfo("备份", "备份已中止。")
             _load_backup_data(show_prompt=False)
             return
 
         if return_code == 0 and final_result is not None:
-            status_var.set("Backup completed")
-            summary = f"HOF: {final_result['hof']}"
-            messagebox.showinfo("Backup completed", summary)
+            status_var.set("备份完成")
+            summary = f"HOF 文件数: {final_result['hof']}"
+            messagebox.showinfo("备份完成", summary)
             _load_backup_data(show_prompt=False)
             return
 
-        status_var.set("Backup failed")
-        messagebox.showerror("Backup failed", stderr_text or "Backup process exited with failure.")
+        status_var.set("备份失败")
+        messagebox.showerror("备份失败", stderr_text or "进程异常退出。")
 
     def _cancel_backup() -> None:
         process = background_backup_process["proc"]
@@ -683,49 +696,39 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     def _save_profile() -> None:
         name = profile_name_var.get().strip()
         if not name:
-            raise ValueError("Profile name is required")
+            raise ValueError("必须填写配置名称 (Profile Name)")
         maps = _selected_names(maps_listbox, map_display_name_lookup)
         vehicles = _selected_names(vehicles_listbox, vehicle_display_name_lookup)
-        hofs = [
-            {
-                "backup_name": hof_name,
-            }
-            for hof_name in _selected_values(hofs_listbox)
-        ]
+        hofs = [{"backup_name": hof_name} for hof_name in _selected_values(hofs_listbox)]
         _manager_from_inputs().save_profile(name=name, maps=maps, vehicles=vehicles, hofs=hofs)
-        return None
+        return {"saved": name}
 
-    def _profile_get_and_apply() -> Dict[str, object]:
+    def _load_profile_to_ui() -> None:
         profile = _manager_from_inputs().get_profile(profile_name_var.get().strip())
         maps = [str(item) for item in profile.get("maps", [])]
         vehicles = [str(item) for item in profile.get("vehicles", [])]
         hofs = [str(item.get("backup_name", "")) for item in profile.get("hofs", []) if isinstance(item, dict)]
-        map_displays = [display for display, name in map_display_name_lookup.items() if name in maps]
-        vehicle_displays = [display for display, name in vehicle_display_name_lookup.items() if name in vehicles]
-        _select_values(maps_listbox, map_displays)
-        _select_values(vehicles_listbox, vehicle_displays)
+        _select_values(maps_listbox, maps)
+        _select_values(vehicles_listbox, vehicles)
         _select_values(hofs_listbox, hofs)
         _apply_map_vehicle_auto_select()
-        return profile
 
-    def _save_defaults() -> None:
-        game_root = Path(game_root_var.get()).expanduser()
-        _validate_game_root(game_root)
-        repo_root = Path(repo_root_var.get()).expanduser()
-        _save_config(config_path, str(game_root), str(repo_root))
-        return None
+    def _apply_ui_selection_to_game() -> Dict[str, int]:
+        maps = _selected_names(maps_listbox, map_display_name_lookup)
+        vehicles = _selected_names(vehicles_listbox, vehicle_display_name_lookup)
+        hofs = _selected_values(hofs_listbox)
+        result = _manager_from_inputs().apply_selections(selected_maps=maps, selected_vehicles=vehicles, selected_hofs=hofs)
+        _load_backup_data(show_prompt=False)
+        return result
 
-    tk.Button(action_bar, text="Backup All", command=lambda: _run(_start_backup_subprocess)).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Stop Backup", command=_cancel_backup).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Refresh Backups", command=lambda: _run(lambda: _load_backup_data(show_prompt=False))).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Profile Save", command=lambda: _run(_save_profile)).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Profile List", command=lambda: _run(lambda: _manager_from_inputs().list_profiles())).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Profile Get", command=lambda: _run(_profile_get_and_apply)).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Profile Activate", command=lambda: _run(lambda: _manager_from_inputs().set_active_profile(profile_name_var.get().strip()))).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Save Defaults", command=lambda: _run(_save_defaults)).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Restore Profile", command=lambda: _run(lambda: _manager_from_inputs().restore_profile(profile_name_var.get().strip()))).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Restore Active", command=lambda: _run(lambda: _manager_from_inputs().restore_active_profile())).pack(side="left", padx=4)
-    tk.Button(action_bar, text="Clear Output", command=lambda: output.delete("1.0", tk.END)).pack(side="left", padx=4)
+    tk.Button(action_bar, text="备份全部", command=lambda: _run(_start_backup_subprocess)).pack(side="left", padx=4)
+    tk.Button(action_bar, text="中止备份", command=_cancel_backup).pack(side="left", padx=4)
+    tk.Button(action_bar, text="刷新状态", command=lambda: _run(lambda: _load_backup_data(show_prompt=False))).pack(side="left", padx=4)
+    tk.Button(action_bar, text="保存方案", command=lambda: _run(_save_profile)).pack(side="left", padx=4)
+    tk.Button(action_bar, text="加载方案", command=lambda: _run(_load_profile_to_ui)).pack(side="left", padx=4)
+    tk.Button(action_bar, text="方案列表", command=lambda: _run(lambda: _manager_from_inputs().list_profiles())).pack(side="left", padx=4)
+    tk.Button(action_bar, text="应用选择到游戏", command=lambda: _run(_apply_ui_selection_to_game)).pack(side="left", padx=4)
+    tk.Button(action_bar, text="清空日志", command=lambda: output.delete("1.0", tk.END)).pack(side="left", padx=4)
 
     root.after(150, lambda: _load_backup_data(show_prompt=True))
     root.mainloop()
@@ -740,30 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     backup_all = sub.add_parser("backup-all")
     backup_all.add_argument("--progress-json-lines", action="store_true")
-    sub.add_parser("restore-active")
     sub.add_parser("gui")
-
-    restore_profile = sub.add_parser("restore-profile")
-    restore_profile.add_argument("name")
-
-    profile_save = sub.add_parser("profile-save")
-    profile_save.add_argument("name")
-    profile_save.add_argument("--map", action="append", default=[])
-    profile_save.add_argument("--vehicle", action="append", default=[])
-    profile_save.add_argument(
-        "--hof",
-        action="append",
-        default=[],
-        help="backup_name",
-    )
-
-    profile_get = sub.add_parser("profile-get")
-    profile_get.add_argument("name")
-
-    sub.add_parser("profile-list")
-
-    profile_activate = sub.add_parser("profile-activate")
-    profile_activate.add_argument("name")
     return parser
 
 
@@ -799,30 +779,6 @@ def main() -> int:
         else:
             result = manager.backup_all()
         print(json.dumps(result, ensure_ascii=False))
-        return 0
-    if args.command == "restore-active":
-        print(json.dumps(manager.restore_active_profile(), ensure_ascii=False))
-        return 0
-    if args.command == "restore-profile":
-        print(json.dumps(manager.restore_profile(args.name), ensure_ascii=False))
-        return 0
-    if args.command == "profile-save":
-        hofs = [_parse_hof_spec(spec) for spec in args.hof]
-        manager.save_profile(
-            name=args.name,
-            hofs=hofs,
-            maps=args.map,
-            vehicles=args.vehicle,
-        )
-        return 0
-    if args.command == "profile-get":
-        print(json.dumps(manager.get_profile(args.name), indent=2, ensure_ascii=False))
-        return 0
-    if args.command == "profile-list":
-        print(json.dumps(manager.list_profiles(), ensure_ascii=False))
-        return 0
-    if args.command == "profile-activate":
-        manager.set_active_profile(args.name)
         return 0
     parser.error(f"Unknown command {args.command}")
     return 2

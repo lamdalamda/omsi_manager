@@ -1,2 +1,6 @@
 dist
 build
+backups
+profiles.json
+*.exe
+config.txt

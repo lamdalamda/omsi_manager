@@ -53,7 +53,7 @@ pip install pyinstaller
 2. 在仓库根目录执行打包：
 
 ```bash
-pyinstaller --noconfirm --onefile --windowed --name omsi_manager --distpath .. /home/runner/work/omsi_manager/omsi_manager/omsi_manager.py
+pyinstaller --noconfirm --onefile --windowed --name omsi_manager --distpath .  omsi_manager.py
 ```
 
 3. 产物位置：
