@@ -459,6 +459,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         index = listbox.nearest(event.y)
         if index < 0:
             return
+        y_scroll = listbox.yview()
         text = str(listbox.get(index))
         if text.startswith("[X] "):
             listbox.delete(index)
@@ -466,9 +467,11 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         elif text.startswith("[ ] "):
             listbox.delete(index)
             listbox.insert(index, f"[X] {text[4:]}")
+        listbox.yview_moveto(y_scroll[0])
         listbox.selection_clear(0, tk.END)
 
     def _render_vehicles() -> None:
+        y_scroll = vehicles_listbox.yview()
         vehicles_listbox.delete(0, tk.END)
         vehicle_row_map.clear()
         
@@ -496,6 +499,8 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
                     b_box = "[X]" if b_name in active_buses else "[ ]"
                     vehicles_listbox.insert(tk.END, f"    {b_box} {b_name}")
                     vehicle_row_map.append(("bus", folder, b_name))
+        
+        vehicles_listbox.yview_moveto(y_scroll[0])
 
     def _toggle_vehicles_tree(event: "tk.Event") -> None:
         index = vehicles_listbox.nearest(event.y)
@@ -541,6 +546,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
         return [lookup.get(value, value) for value in values]
 
     def _select_values(listbox: "tk.Listbox", values: Iterable[str], clear_existing: bool = True) -> None:
+        y_scroll = listbox.yview()
         target = {str(value).lower() for value in values}
         for index in range(listbox.size()):
             text = str(listbox.get(index))
@@ -552,19 +558,24 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
             if text != f"{prefix}{core_text}":
                 listbox.delete(index)
                 listbox.insert(index, f"{prefix}{core_text}")
+        listbox.yview_moveto(y_scroll[0])
 
     def _fill_simple_listbox(listbox: "tk.Listbox", values_with_state: Iterable[Tuple[str, bool]]) -> None:
+        y_scroll = listbox.yview()
         listbox.delete(0, tk.END)
         for value, is_active in sorted(values_with_state, key=lambda item: item[0].lower()):
             prefix = "[X] " if is_active else "[ ] "
             listbox.insert(tk.END, f"{prefix}{value}")
+        listbox.yview_moveto(y_scroll[0])
 
     def _set_all_state_simple(listbox: "tk.Listbox", state: bool) -> None:
+        y_scroll = listbox.yview()
         for index in range(listbox.size()):
             text = str(listbox.get(index))[4:]
             prefix = "[X] " if state else "[ ] "
             listbox.delete(index)
             listbox.insert(index, f"{prefix}{text}")
+        listbox.yview_moveto(y_scroll[0])
 
     def _set_all_state_vehicles(state: bool) -> None:
         for item in vehicle_tree_data:
@@ -595,6 +606,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
     maps_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
     vehicles_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
     hofs_listbox.pack(side=tk.TOP, fill="both", expand=True, padx=8, pady=4)
+    
     def _has_initial_backup(repo_root: Path) -> bool:
         hof_backup = repo_root / "backups" / "hof"
         return hof_backup.exists() and any(hof_backup.glob("*.hof"))
@@ -606,6 +618,7 @@ def launch_gui(default_game_root: str = ".", default_repo_root: str = ".") -> in
                 names = _vehicle_names_from_ailist_content(ailist_path.read_text(encoding="utf-8", errors="ignore"))
                 refs.update(name.lower() for name in names)
         return refs
+        
     def _set_progress(current: int, total: int, message: str) -> None:
         backup_progress.configure(maximum=max(total, 1))
         backup_progress_var.set(current)
